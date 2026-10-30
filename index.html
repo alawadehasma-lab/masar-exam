@@ -211,7 +211,7 @@ function renderLog(){
   const txt=L.map(r=>[new Date(r.t).toLocaleString("ar-JO"),r.ex,r.name,r.sec,`${r.score}/${r.total}`,r.skills].join("\t")).join("\n");
   app.innerHTML = mast("سجل النتائج على هذا الجهاز") + `<section class="panel">
     <p>عدد الطالبات اللواتي امتحنّ على هذا الجهاز: <b>${L.length}</b> — نتائج لم تُرسل بعد: <b id="pend">${getQ().length}</b> ${getQ().length?'<button class="btn ghost" id="rs" style="padding:4px 12px;font-size:13px">أرسليها الآن</button>':''}</p>
-    <p style="font-size:13.5px;color:var(--muted)">الإرسال: ${hasSB()?"✓ مسار (Supabase)":"✗ مسار غير مربوط"} — ${hasTG()?"✓ تيليجرام":"✗ تيليجرام غير مربوط"}${CFG.stationName?` — الجهاز: ${esc(CFG.stationName)}`:""}</p>
+    <p style="font-size:13.5px;color:var(--muted)">الإرسال: ${hasSB()?"✓ مسار (Supabase) — يصلك إشعار Telegram من البوت":"✗ مسار غير مربوط"}${CFG.stationName?` — الجهاز: ${esc(CFG.stationName)}`:""}</p>
     <div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%;font-size:14px;min-width:560px">
       <tr style="background:var(--brand-soft)"><th style="padding:6px">الوقت</th><th>الامتحان</th><th>الاسم</th><th>الشعبة</th><th>العلامة</th><th>مغادرة الصفحة</th></tr>
       ${L.map(r=>`<tr style="border-top:1px solid var(--line)"><td style="padding:6px">${new Date(r.t).toLocaleString("ar-JO")}</td><td>${esc(r.ex)}</td><td>${esc(r.name)}</td><td>${esc(r.sec)}</td><td><b>${r.score}/${r.total}</b></td><td>${r.leaves}${r.auto?" (سُلّم تلقائيًا)":""}</td></tr>`).join("")||'<tr><td colspan="6" style="padding:10px">لا نتائج بعد.</td></tr>'}
@@ -319,27 +319,23 @@ function submit(auto){
   S.stage="result"; S.auto=auto; S.submittedAt=Date.now(); S.result={score:g.score,total:g.total}; S.sync="pending"; save(); logResult(g);
   render(); sendToMasar(g);
 }
-/* ---------- الإرسال إلى مسار وتيليجرام (مع طابور عند انقطاع الإنترنت) ---------- */
+/* ---------- الإرسال إلى مسار (مع طابور عند انقطاع الإنترنت). إشعار Telegram يرسله بوت مسار من الخادم ---------- */
 const QK = KEY+"-queue";
 const getQ=()=>{ try{ return JSON.parse(localStorage.getItem(QK)||"[]"); }catch(e){ return []; } };
 const setQ=q=>{ try{ localStorage.setItem(QK,JSON.stringify(q)); }catch(e){} };
-const hasSB=()=>!!(CFG.supabaseUrl&&CFG.supabaseKey), hasTG=()=>!!(CFG.telegramToken&&CFG.telegramChatId);
+const hasSB=()=>!!(CFG.supabaseUrl&&CFG.supabaseKey);
 async function pushOne(it){
   if(hasSB() && !it.sb){
-    const h={"apikey":CFG.supabaseKey,"Content-Type":"application/json","Prefer":"return=minimal"};
+    const h={"apikey":CFG.supabaseKey,"Content-Type":"application/json","Prefer":"return=minimal,resolution=ignore-duplicates"};
     if(!CFG.supabaseKey.startsWith("sb_")) h.Authorization="Bearer "+CFG.supabaseKey;
-    const r=await fetch(CFG.supabaseUrl.replace(/\/$/,"")+"/rest/v1/exam_results",{method:"POST",headers:h,body:JSON.stringify(it.row)});
+    const r=await fetch(CFG.supabaseUrl.replace(/\/$/,"")+"/rest/v1/exam_results?on_conflict=sid",{method:"POST",headers:h,body:JSON.stringify(it.row)});
     if(r.ok) it.sb=true;
   }
-  if(hasTG() && !it.tg){
-    const r=await fetch("https://api.telegram.org/bot"+CFG.telegramToken+"/sendMessage",{method:"POST",body:new URLSearchParams({chat_id:String(CFG.telegramChatId),text:it.text})});
-    if(r.ok) it.tg=true;
-  }
-  return (!hasSB()||it.sb) && (!hasTG()||it.tg);
+  return !hasSB() || it.sb;
 }
 let flushing=false;
 async function flush(){
-  if(flushing||(!hasSB()&&!hasTG())) return;
+  if(flushing||!hasSB()) return;
   flushing=true;
   const q=getQ(), rest=[];
   for(const it of q){ let done=false; try{ done=await pushOne(it); }catch(e){} if(!done) rest.push(it); }
@@ -349,22 +345,16 @@ async function flush(){
 }
 window.addEventListener("online", flush);
 setInterval(flush, 60000);
-function tgText(g,row){
-  const e=exam(), p=row.percent;
-  return `📝 ${e.short}\n👤 ${S.name} — ${S.section}\n✅ العلامة: ${g.score}/${g.total} (${p}٪) — ${tierOf(p)}\n📊 ${Object.entries(g.per).map(([k,v])=>`${k} ${v.c}/${v.t}`).join(" | ")}`+
-    (row.confident_wrong?`\n⚠️ أخطاء واثقة: ${row.confident_wrong}`:"")+(row.tab_leaves?`\n🚪 غادرت الصفحة ${row.tab_leaves} مرة`:"")+(row.auto_submitted?`\n⏱️ سُلّم تلقائيًا لانتهاء الوقت`:"")+
-    `\n🕒 ${Math.round(row.duration_sec/60)} دقيقة${CFG.stationName?` — ${CFG.stationName}`:""}`;
-}
 async function sendToMasar(g){
   const e=exam();
   const row={ exam_id:e.id, exam_title:e.title, student_name:S.name, class_name:S.section, score:g.score, total:g.total,
     percent:Math.round(g.score/g.total*100), skills:Object.fromEntries(Object.entries(g.per).map(([k,v])=>[k,`${v.c}/${v.t}`])),
     confident_wrong:g.items.filter(x=>!x.ok&&x.conf===3).length, tab_leaves:S.leaves||0, auto_submitted:!!S.auto,
-    duration_sec:Math.round((S.submittedAt-S.startedAt)/1000), mode:"electronic",
+    duration_sec:Math.round((S.submittedAt-S.startedAt)/1000), mode:"electronic", station:CFG.stationName||null, sid:null,
     answers:g.items.map(x=>({orig:S.order[x.j].i, ok:x.ok, conf:x.conf})) };
-  if(!hasSB()&&!hasTG()){ S.sync="local"; save(); return showSync(); }
-  S.qid = Date.now()+"-"+Math.random().toString(36).slice(2,7);
-  const q=getQ(); q.push({id:S.qid,row,text:tgText(g,row),sb:false,tg:false}); setQ(q);
+  if(!hasSB()){ S.sync="local"; save(); return showSync(); }
+  S.qid = Date.now()+"-"+Math.random().toString(36).slice(2,7); row.sid = S.qid;
+  const q=getQ(); q.push({id:S.qid,row,sb:false}); setQ(q);
   S.sync="pending"; save(); showSync();
   await flush();
 }
